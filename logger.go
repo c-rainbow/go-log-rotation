@@ -93,6 +93,7 @@ func (logger *RotatingFileLogger) Close() error {
 	logger.mutex.Lock()
 	defer logger.mutex.Unlock()
 
+	logger.isOpen = false
 	logger.ticker.Stop()
 	logger.closeCh <- true
 	return logger.writer.Close()
@@ -120,7 +121,9 @@ func (logger *RotatingFileLogger) flushToFile() error {
 			}
 		}
 
-		return logger.writer.Write(e.message + "\n")
+		if err := logger.writer.Write(e.message + "\n"); err != nil {
+			return err
+		}
 	}
 
 	return logger.writer.Flush()
