@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -51,24 +50,28 @@ func getEpochHour(timestamp *time.Time) *time.Time {
 type RotatingFileLogger struct {
 	mutex    sync.Mutex
 	isOpen   bool
+	baseDir  string
+	prefix   string
 	pq       *priorityqueue.Queue
-	baseDir  string // Base dir path to create files
-	prefix   string // Prefix of filenames to be created
-	file     *os.File
-	writer   *bufio.Writer // Buffered writer to the file
 	interval time.Duration // Interval to flush logs to file
 	ticker   *time.Ticker  // Ticker that runs every interval
+	closeCh  chan (bool)
+	writer   LogFileWriter // Abstraction of file writer
 }
 
-func New(baseDir string, prefix string, interval time.Duration) *RotatingFileLogger {
+func NewLogger(baseDir string, prefix string, interval time.Duration) *RotatingFileLogger {
+	if err := os.MkdirAll(baseDir, fs.FileMode(os.O_RDWR)); err != nil {
+		log.Fatalln("Cannot create a base dir", baseDir)
+	}
+
 	logger := RotatingFileLogger{
 		isOpen:   true,
-		pq:       priorityqueue.NewWith(byTimestampAndId),
 		baseDir:  baseDir,
 		prefix:   prefix,
-		writer:   nil,
+		pq:       priorityqueue.NewWith(byTimestampAndId),
 		interval: interval,
 		ticker:   nil,
+		closeCh:  make(chan bool),
 	}
 	go logger.start()
 
@@ -91,8 +94,14 @@ func (logger *RotatingFileLogger) Close() error {
 	defer logger.mutex.Unlock()
 
 	logger.ticker.Stop()
-	logger.flushToFile()
-	return logger.file.Close()
+	logger.closeCh <- true
+	return logger.writer.Close()
+}
+
+func (logger *RotatingFileLogger) FlushToFile() error {
+	logger.mutex.Lock()
+	defer logger.mutex.Unlock()
+	return logger.flushToFile()
 }
 
 // It is assumed that the mutex is already locked.
@@ -101,29 +110,25 @@ func (logger *RotatingFileLogger) flushToFile() error {
 		dequeued, _ := logger.pq.Dequeue()
 		e := dequeued.(element)
 
-		logFilePath := logger.getLogFilePath(&e.timestamp)
+		logFilename := logger.getLogFilename(&e.timestamp)
 		// New epoch hour. Close the previous log file and create a new one
-		if logFilePath != logger.file.Name() {
-			if logger.writer != nil {
-				logger.writer.Flush()
-				logger.writer = nil
-			}
-
-			file, err := logger.openLogFile(logFilePath)
+		if logFilename != logger.writer.Name() {
+			logFilePath := path.Join(logger.baseDir, logFilename)
+			err := logger.writer.openLogFile(logFilePath)
 			if err != nil {
 				return err
 			}
-			logger.file = file
-			logger.writer = bufio.NewWriter(file)
 		}
 
-		if _, err := logger.writer.WriteString(e.message + "\n"); err != nil {
-			return err
-		}
-
+		return logger.writer.Write(e.message + "\n")
 	}
 
 	return logger.writer.Flush()
+}
+
+func (logger *RotatingFileLogger) getLogFilename(ts *time.Time) string {
+	filename := fmt.Sprintf("%s%04d-%02d-%02dT%02d00.log", logger.prefix, ts.Year(), ts.Month(), ts.Day(), ts.Hour())
+	return filename
 }
 
 func (logger *RotatingFileLogger) start() {
@@ -136,29 +141,9 @@ func (logger *RotatingFileLogger) start() {
 	for {
 		select {
 		case <-logger.ticker.C:
-			func() {
-				logger.mutex.Lock()
-				defer logger.mutex.Unlock()
-				logger.flushToFile()
-			}()
+			logger.FlushToFile()
+		case <-logger.closeCh:
+			break
 		}
 	}
-}
-
-func (logger *RotatingFileLogger) getLogFilePath(ts *time.Time) string {
-	name := fmt.Sprintf("%4d-%2d-%2dT%2d00.log", ts.Year(), ts.Month(), ts.Day(), ts.Hour())
-	filename := path.Join(logger.baseDir, logger.prefix, name)
-	return filename
-}
-
-/*
-Get file handle from the input timestamp
-*/
-func (logger *RotatingFileLogger) openLogFile(filepath string) (*os.File, error) {
-	file, err := os.OpenFile(filepath, os.O_CREATE|os.O_APPEND, fs.ModeAppend)
-	if err != nil {
-		log.Fatalln("Cannot open log file", filepath)
-		return nil, err
-	}
-	return file, nil
 }
