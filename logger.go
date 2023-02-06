@@ -49,7 +49,7 @@ func getEpochHour(timestamp *time.Time) *time.Time {
 /*
  */
 type RotatingFileLogger struct {
-	mutex    *sync.Mutex
+	mutex    sync.Mutex
 	isOpen   bool
 	pq       *priorityqueue.Queue
 	baseDir  string // Base dir path to create files
@@ -62,7 +62,6 @@ type RotatingFileLogger struct {
 
 func New(baseDir string, prefix string, interval time.Duration) *RotatingFileLogger {
 	logger := RotatingFileLogger{
-		mutex:    &sync.Mutex{},
 		isOpen:   true,
 		pq:       priorityqueue.NewWith(byTimestampAndId),
 		baseDir:  baseDir,
@@ -87,10 +86,17 @@ func (logger *RotatingFileLogger) AddMessage(message string, timestamp time.Time
 	logger.pq.Enqueue(element{message: message, timestamp: timestamp})
 }
 
-func (logger *RotatingFileLogger) flushToFile() error {
+func (logger *RotatingFileLogger) Close() error {
 	logger.mutex.Lock()
 	defer logger.mutex.Unlock()
 
+	logger.ticker.Stop()
+	logger.flushToFile()
+	return logger.file.Close()
+}
+
+// It is assumed that the mutex is already locked.
+func (logger *RotatingFileLogger) flushToFile() error {
 	for logger.pq.Size() > 0 {
 		dequeued, _ := logger.pq.Dequeue()
 		e := dequeued.(element)
@@ -120,13 +126,6 @@ func (logger *RotatingFileLogger) flushToFile() error {
 	return logger.writer.Flush()
 }
 
-func (logger *RotatingFileLogger) Close() error {
-	logger.isOpen = false
-	logger.ticker.Stop()
-	logger.flushToFile()
-	return logger.file.Close()
-}
-
 func (logger *RotatingFileLogger) start() {
 	if err := os.MkdirAll(logger.baseDir, fs.FileMode(os.O_RDWR)); err != nil {
 		log.Fatalln("Cannot create a base dir", logger.baseDir)
@@ -137,14 +136,18 @@ func (logger *RotatingFileLogger) start() {
 	for {
 		select {
 		case <-logger.ticker.C:
-			logger.flushToFile()
+			func() {
+				logger.mutex.Lock()
+				defer logger.mutex.Unlock()
+				logger.flushToFile()
+			}()
 		}
 	}
 }
 
 func (logger *RotatingFileLogger) getLogFilePath(ts *time.Time) string {
-	suffix := fmt.Sprintf("%4d-%2d-%2dT%2d00.log", ts.Year(), ts.Month(), ts.Day(), ts.Hour())
-	filename := path.Join(logger.baseDir, logger.prefix, "_", suffix)
+	name := fmt.Sprintf("%4d-%2d-%2dT%2d00.log", ts.Year(), ts.Month(), ts.Day(), ts.Hour())
+	filename := path.Join(logger.baseDir, logger.prefix, name)
 	return filename
 }
 
