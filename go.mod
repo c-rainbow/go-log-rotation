@@ -1,4 +1,4 @@
-module irctestmodule
+module github.com/c-rainbow/go-log-rotation
 
 go 1.19
 
